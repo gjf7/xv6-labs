@@ -49,6 +49,8 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
+
+  pte_t *pte = walk(p->pagetable, r_stval(), 0);
   
   if(r_scause() == 8){
     // system call
@@ -67,6 +69,10 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 15 && *pte && (*pte & PTE_RSW)){
+    // COW page fault
+    if (cow_real_alloc(p->pagetable, r_stval()) != 0)
+      p->killed = 1;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
