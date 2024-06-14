@@ -49,8 +49,6 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-
-  pte_t *pte = walk(p->pagetable, r_stval(), 0);
   
   if(r_scause() == 8){
     // system call
@@ -69,7 +67,7 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if(r_scause() == 15 && *pte && (*pte & PTE_RSW)){
+  } else if(r_scause() == 15){
     // COW page fault
     if (cow_real_alloc(p->pagetable, r_stval()) != 0)
       p->killed = 1;

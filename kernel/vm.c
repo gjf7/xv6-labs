@@ -4,6 +4,8 @@
 #include "elf.h"
 #include "riscv.h"
 #include "defs.h"
+#include "spinlock.h"
+#include "proc.h"
 #include "fs.h"
 
 /*
@@ -16,6 +18,11 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
 
 extern int page_ref_count[];
+
+extern struct {
+  struct spinlock lock;
+  struct run *freelist;
+} kmem;
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -83,7 +90,7 @@ pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
   if(va >= MAXVA)
-    return 0;
+    panic("walk");
 
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
@@ -181,10 +188,8 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
 
-    uint64 pa = PTE2PA(*pte);
-    page_ref_count[(uint64)pa/PGSIZE] -= 1;
-
     if(do_free){
+      uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
     *pte = 0;
@@ -321,7 +326,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
       panic("uvmcopy cow: map pages failed");
     }
+    acquire(&kmem.lock);
     page_ref_count[pa/PGSIZE] += 1;
+    release(&kmem.lock);
   }
   return 0;
 }
@@ -353,9 +360,14 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     if(pa0 == 0)
       return -1;
     pte_t *pte = walk(pagetable, va0, 0);
+    if (pte == 0)
+      return -1;
     if (*pte & PTE_RSW){
-      if (cow_real_alloc(pagetable, va0) != 0)
+      if (cow_real_alloc(pagetable, va0) != 0){
+        struct proc *p = myproc();
+        p->killed = 1;
         return -1;
+      }
       pa0 = walkaddr(pagetable, va0);
     }
     n = PGSIZE - (dstva - va0);
@@ -441,12 +453,20 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 int
 cow_real_alloc(pagetable_t pagetable, uint64 va)
 {
+  if (va >= MAXVA)
+    return -1;
+
+  pte_t *pte = walk(pagetable, va, 0);
+  if (pte == 0)
+    return -1;
+ if ((*pte & PTE_U) == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_RSW) == 0)
+    return -1;
+
   uint64 va0 = PGROUNDDOWN(va);
   uint64 pa = walkaddr(pagetable, va0);
   char *mem;
   if ((mem = kalloc()) != 0) {
     memmove(mem, (void *)pa, PGSIZE);
-    pte_t *pte = walk(pagetable, va0, 0);
     int flags = PTE_FLAGS(*pte | PTE_W);
     uvmunmap(pagetable, va0, 1, 1);
     if (mappages(pagetable, va0, PGSIZE, (uint64)mem, flags) != 0) {
