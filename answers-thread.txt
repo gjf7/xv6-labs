@@ -1,0 +1,1 @@
+If two threads concurrently read a key for insertion,both find it empty at same time, resulting in insertion at same spot, with one overwriting the other.
